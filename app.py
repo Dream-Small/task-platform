@@ -160,9 +160,8 @@ def delete_task(task_id):
     conn.close()
 
 
-def import_tasks_from_csv(file):
-    """从 CSV 文件批量导入任务，返回 (成功数, 总数, 错误列表)"""
-    df = pd.read_csv(file)
+def import_tasks(df):
+    """从 DataFrame 批量导入任务（支持 CSV / Excel），返回 (成功数, 总数, 错误列表)"""
     # 列名兼容映射（支持导出格式与常见自定义格式）
     col_map = {}
     for c in df.columns:
@@ -181,11 +180,13 @@ def import_tasks_from_csv(file):
     required = ["name", "start", "end", "owner"]
     missing = [r for r in required if r not in df.columns]
     if missing:
-        return 0, 0, [f"CSV 缺少必需列：{'、'.join(missing)}（需要：任务名称、开始时间、结束时间、负责人）"]
+        return 0, 0, [f"文件缺少必需列：{'、'.join(missing)}（需要：任务名称、开始时间、结束时间、负责人）"]
     success = 0
     errors = []
     for i, row in df.iterrows():
-        row_no = i + 2  # CSV 实际行号（第1行是表头）
+        row_no = i + 2  # 表格实际行号（第1行是表头）
+        if row.isna().all():
+            continue  # 整行为空（Excel 常见），静默跳过
         name = str(row["name"]).strip() if pd.notna(row["name"]) else ""
         owner = str(row["owner"]).strip() if pd.notna(row["owner"]) else ""
         if not name or not owner:
@@ -376,10 +377,10 @@ def main():
             st.download_button("📥 导出任务CSV", csv_data, "生产任务清单.csv", "text/csv", use_container_width=True)
 
         st.markdown("##### 📤 导入任务")
-        with st.expander("从 CSV 文件批量导入任务"):
+        with st.expander("从 CSV / Excel 文件批量导入任务"):
             st.caption(
-                "支持列：任务名称、开始时间、结束时间、负责人、完成进度(%) —— "
-                "与导出格式一致（编号、状态列会自动忽略）。开始时间支持 2026-10-13 或 2026/10/13 格式。"
+                "支持 Excel（.xlsx / .xls）和 CSV（.csv）文件。"
+                "列名支持：任务名称、开始时间、结束时间、负责人、完成进度(%)，与导出格式一致（编号、状态列自动忽略）。"
             )
             if "import_done" in st.session_state:
                 ok, total, errs = st.session_state.pop("import_done")
@@ -389,20 +390,22 @@ def main():
                     with st.expander(f"⚠️ {total - ok} 条数据被跳过，点击查看原因"):
                         for e in errs:
                             st.write(e)
-            up = st.file_uploader("选择 CSV 文件", type=["csv"], key="csv_import")
+            up = st.file_uploader("选择文件", type=["csv", "xlsx", "xls"], key="csv_import")
             if up is not None:
                 try:
-                    up.seek(0)
-                    preview_df = pd.read_csv(up)
-                    st.dataframe(preview_df.head(5), use_container_width=True, hide_index=True)
-                    st.caption(f"共检测到 {len(preview_df)} 行数据（仅预览前 5 行）")
+                    if up.name.lower().endswith((".xlsx", ".xls")):
+                        uploaded_df = pd.read_excel(up)
+                    else:
+                        uploaded_df = pd.read_csv(up)
+                    st.dataframe(uploaded_df.head(5), use_container_width=True, hide_index=True)
+                    st.caption(f"共检测到 {len(uploaded_df)} 行数据（仅预览前 5 行）")
                     if st.button("✅ 确认导入", key="do_import", use_container_width=True):
-                        up.seek(0)
-                        ok, total, errs = import_tasks_from_csv(up)
+                        ok, total, errs = import_tasks(uploaded_df)
                         st.session_state["import_done"] = (ok, total, errs)
                         st.rerun()
                 except Exception as ex:
                     st.error(f"文件解析失败：{ex}")
+                    st.caption("提示：Excel 文件请保存为 .xlsx 格式（WPS/Office 另存为 → Excel 工作簿(*.xlsx)）")
 
     with tab2:
         st.markdown("#### 📅 任务时间线")
