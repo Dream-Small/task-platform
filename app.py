@@ -13,6 +13,110 @@ STATUS_ORDER = ["未开始", "进行中", "已完成", "已延期"]
 COLOR_MAP = {"未开始": "#9E9E9E", "进行中": "#1E88E5", "已完成": "#43A047", "已延期": "#E53935"}
 
 
+def inject_css():
+    st.markdown(
+        """<style>
+/* 全局字体 */
+html, body, [class*="css"]  {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+/* 隐藏 Streamlit 默认装饰 */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header[data-testid="stHeader"] {background: transparent;}
+/* 主标题卡片 */
+.main-header {
+    background: linear-gradient(135deg, #0B5394 0%, #1976D2 100%);
+    padding: 26px 32px;
+    border-radius: 14px;
+    color: white;
+    margin-bottom: 24px;
+    box-shadow: 0 4px 16px rgba(11, 83, 148, 0.18);
+}
+.main-header h1 {color: white !important; margin: 0; font-size: 26px; font-weight: 700;}
+.main-header p {color: rgba(255,255,255,0.88); margin: 8px 0 0 0; font-size: 14px;}
+/* 侧边栏 */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #F8FAFC 0%, #EDF2F7 100%);
+}
+section[data-testid="stSidebar"] h1,
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3 {color: #0B5394;}
+/* Tab 样式 */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 4px;
+    background: #F0F4FA;
+    padding: 4px;
+    border-radius: 12px;
+}
+.stTabs [data-baseweb="tab"] {
+    height: 42px;
+    padding: 0 20px;
+    border-radius: 8px;
+    font-weight: 600;
+}
+.stTabs [aria-selected="true"] {
+    background: white;
+    color: #0B5394 !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+/* 按钮 */
+.stButton button {
+    border-radius: 8px;
+    font-weight: 600;
+    transition: all 0.2s;
+}
+.stButton button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+/* 数据表 */
+.stDataFrame {border-radius: 10px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,0.04);}
+/* 表单 */
+[data-testid="stForm"] {
+    background: #F8FAFC;
+    border-radius: 12px;
+    padding: 20px;
+    border: 1px solid #E5EAF0;
+}
+/* 输入框 */
+.stTextInput input, .stDateInput input,
+.stSelectbox div[data-baseweb="select"] {border-radius: 8px;}
+/* 提示框 */
+.stAlert {border-radius: 10px;}
+/* 分割线 */
+hr {margin: 1.5rem 0;}
+/* 滑块 */
+.stSlider [data-baseweb="slider"] [role="slider"] {background-color: #0B5394;}
+/* 标题 */
+h1, h2, h3 {color: #1F2937;}
+/* Plotly 图表背景透明 */
+.js-plotly-plot .plotly .main-svg {background: transparent !important;}
+</style>""",
+        unsafe_allow_html=True,
+    )
+
+
+def status_pill_css(s):
+    color = COLOR_MAP.get(s, "#9E9E9E")
+    return (
+        f"background-color: {color}; color: white; font-weight: 600; "
+        f"border-radius: 12px; padding: 4px 12px; text-align: center; "
+        f"display: inline-block; min-width: 64px;"
+    )
+
+
+def metric_card(label, value, color, icon=""):
+    return (
+        f'<div style="background: linear-gradient(135deg, {color} 0%, {color}DD 100%); '
+        f'padding: 18px 22px; border-radius: 12px; color: white; '
+        f'box-shadow: 0 2px 10px rgba(0,0,0,0.08); margin-bottom: 8px;">'
+        f'<div style="font-size: 13px; opacity: 0.92; font-weight: 500;">{icon} {label}</div>'
+        f'<div style="font-size: 30px; font-weight: 700; margin-top: 6px; line-height: 1;">{value}</div>'
+        f'</div>'
+    )
+
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
@@ -105,12 +209,22 @@ def make_gantt(df):
 
 
 def main():
-    st.title("重型装备车间生产任务进度数字化跟踪平台")
+    inject_css()
     init_db()
     df_all = load_tasks()
 
+    st.markdown(
+        """
+        <div class="main-header">
+            <h1>🏭 重型装备车间生产任务进度数字化跟踪平台</h1>
+            <p>实时跟踪任务进度 · 智能预警延期风险 · 数据驱动生产决策</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     with st.sidebar:
-        st.header("筛选条件")
+        st.markdown("### 🔍 筛选条件")
         if df_all.empty:
             st.info("暂无任务数据，请先在「任务管理」页录入任务")
         else:
@@ -146,7 +260,7 @@ def main():
     with tab1:
         col_add, col_edit = st.columns(2)
         with col_add:
-            st.subheader("新增任务")
+            st.markdown("##### ➕ 新增任务")
             with st.form("add_form"):
                 name = st.text_input("任务名称")
                 start = st.date_input("开始时间", value=date.today())
@@ -164,7 +278,7 @@ def main():
                         st.success(f"任务「{name}」添加成功")
                         st.rerun()
         with col_edit:
-            st.subheader("修改 / 删除任务")
+            st.markdown("##### ✏️ 修改 / 删除任务")
             if df_all.empty:
                 st.info("暂无任务可编辑")
             else:
@@ -195,7 +309,7 @@ def main():
                         st.warning(f"任务「{e_name}」已删除")
                         st.rerun()
 
-        st.subheader("任务清单")
+        st.markdown("##### 📋 任务清单")
         if df.empty:
             st.info("暂无符合条件的任务")
         else:
@@ -203,23 +317,36 @@ def main():
             show.columns = ["编号", "任务名称", "开始时间", "结束时间", "负责人", "完成进度(%)", "状态"]
             show["开始时间"] = show["开始时间"].dt.strftime("%Y-%m-%d")
             show["结束时间"] = show["结束时间"].dt.strftime("%Y-%m-%d")
-            st.dataframe(show, use_container_width=True, hide_index=True)
+            styled = show.style.map(status_pill_css, subset=["状态"]).format({"完成进度(%)": "{:.0f}%"})
+            st.dataframe(styled, use_container_width=True, hide_index=True)
             csv_data = df[["id", "name", "start", "end", "owner", "progress", "状态"]].to_csv(index=False).encode("utf-8-sig")
-            st.download_button("导出任务CSV", csv_data, "生产任务清单.csv", "text/csv", use_container_width=True)
+            st.download_button("📥 导出任务CSV", csv_data, "生产任务清单.csv", "text/csv", use_container_width=True)
 
     with tab2:
+        st.markdown("#### 📅 任务时间线")
         if df.empty:
             st.info("暂无任务数据，请先录入任务")
         else:
+            c1, c2, c3, c4 = st.columns(4)
+            total = len(df)
+            ongoing = int((df["状态"] == "进行中").sum())
+            done = int((df["状态"] == "已完成").sum())
+            avg_prog = int(df["progress"].mean())
+            c1.markdown(metric_card("任务总数", total, "#0B5394", "📊"), unsafe_allow_html=True)
+            c2.markdown(metric_card("进行中", ongoing, "#1E88E5", "⚙️"), unsafe_allow_html=True)
+            c3.markdown(metric_card("已完成", done, "#43A047", "✅"), unsafe_allow_html=True)
+            c4.markdown(metric_card("平均进度", f"{avg_prog}%", "#F6A623", "📈"), unsafe_allow_html=True)
+            st.divider()
             fig = make_gantt(df)
             st.plotly_chart(
                 fig,
                 use_container_width=True,
                 config={"toImageButtonOptions": {"format": "png", "scale": 2, "filename": "甘特图"}},
             )
-            st.caption("导出甘特图图片：将鼠标移到图表右上角，点击工具栏中的相机图标即可下载PNG图片")
+            st.caption("💡 导出甘特图图片：将鼠标移到图表右上角，点击工具栏中的相机图标即可下载 PNG 图片")
 
     with tab3:
+        st.markdown("#### ⚠️ 风险预警")
         if df_all.empty:
             st.info("暂无任务数据")
         else:
@@ -227,50 +354,112 @@ def main():
             soon = df_all[(df_all["end"] >= today) & (df_all["end"] <= today + pd.Timedelta(days=3)) & (df_all["progress"] < 100)]
             late = df_all[(df_all["end"] < today) & (df_all["progress"] < 100)]
             c1, c2 = st.columns(2)
-            c1.metric("临近到期任务（3天内）", len(soon))
-            c2.metric("延期任务", len(late))
-            st.subheader("延期任务（红色高亮）")
+            c1.markdown(metric_card("临近到期（3天内）", len(soon), "#F6A623", "⏰"), unsafe_allow_html=True)
+            c2.markdown(metric_card("延期任务", len(late), "#E53935", "🚨"), unsafe_allow_html=True)
+            st.markdown("##### 🚨 延期任务")
             if late.empty:
-                st.success("无延期任务")
+                st.success("🎉 暂无延期任务，团队执行良好！")
             else:
                 late_show = late[["name", "owner", "end", "progress"]].copy()
                 late_show["end"] = late_show["end"].dt.strftime("%Y-%m-%d")
                 late_show.columns = ["任务名称", "负责人", "结束时间", "完成进度(%)"]
-                late_show = late_show.style.map(lambda v: "color: #E53935; font-weight: bold;")
-                st.dataframe(late_show, use_container_width=True, hide_index=True)
-            st.subheader("临近到期任务（黄色提醒）")
+                late_styled = late_show.style.map(
+                    lambda v: "color: #E53935; font-weight: 600;"
+                ).format({"完成进度(%)": "{:.0f}%"})
+                st.dataframe(late_styled, use_container_width=True, hide_index=True)
+            st.markdown("##### ⏰ 临近到期任务")
             if soon.empty:
-                st.success("无临近到期任务")
+                st.success("✅ 暂无临近到期任务")
             else:
                 soon_show = soon[["name", "owner", "end", "progress"]].copy()
                 soon_show["剩余天数"] = (soon["end"] - today).dt.days
                 soon_show["end"] = soon_show["end"].dt.strftime("%Y-%m-%d")
                 soon_show.columns = ["任务名称", "负责人", "结束时间", "完成进度(%)", "剩余天数"]
-                st.dataframe(soon_show, use_container_width=True, hide_index=True)
+                soon_styled = soon_show.style.format({"完成进度(%)": "{:.0f}%"})
+                st.dataframe(soon_styled, use_container_width=True, hide_index=True)
 
     with tab4:
+        st.markdown("#### 📊 数据分析")
         if df_all.empty:
             st.info("暂无任务数据")
         else:
             counts = df_all["状态"].value_counts().reindex(STATUS_ORDER, fill_value=0)
+            c1, c2, c3, c4 = st.columns(4)
+            total_tasks = int(counts.sum())
+            ongoing = int(counts["进行中"])
+            done = int(counts["已完成"])
+            late_n = int(counts["已延期"])
+            c1.markdown(metric_card("任务总数", total_tasks, "#0B5394", "📋"), unsafe_allow_html=True)
+            c2.markdown(metric_card("进行中", ongoing, "#1E88E5", "⚙️"), unsafe_allow_html=True)
+            c3.markdown(metric_card("已完成", done, "#43A047", "✅"), unsafe_allow_html=True)
+            c4.markdown(metric_card("已延期", late_n, "#E53935", "🚨"), unsafe_allow_html=True)
+            st.divider()
             c1, c2 = st.columns(2)
-            for s in STATUS_ORDER:
-                c2.metric(s, int(counts[s]))
-            c1.subheader("任务状态占比")
-            pie = px.pie(
-                names=counts.index,
-                values=counts.values,
-                color=counts.index,
-                color_discrete_map=COLOR_MAP,
-                hole=0.4,
-            )
-            pie.update_layout(margin=dict(l=10, r=10, t=10, b=10), legend_title_text="任务状态")
-            c1.plotly_chart(pie, use_container_width=True)
-            st.subheader("负责人任务完成情况")
+            with c1:
+                st.markdown("##### 📈 任务状态占比")
+                pie = px.pie(
+                    names=counts.index,
+                    values=counts.values,
+                    color=counts.index,
+                    color_discrete_map=COLOR_MAP,
+                    hole=0.45,
+                )
+                pie.update_traces(textposition="inside", textinfo="percent+label")
+                pie.update_layout(margin=dict(l=10, r=10, t=10, b=10), legend_title_text="任务状态", paper_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(pie, use_container_width=True)
+            with c2:
+                st.markdown("##### 📊 状态分布")
+                bar = px.bar(
+                    x=counts.index,
+                    y=counts.values,
+                    color=counts.index,
+                    color_discrete_map=COLOR_MAP,
+                    text=counts.values,
+                )
+                bar.update_traces(textposition="outside", textfont_size=14)
+                bar.update_layout(
+                    showlegend=False,
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    xaxis_title="",
+                    yaxis_title="任务数",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                )
+                st.plotly_chart(bar, use_container_width=True)
+            st.markdown("##### 👨‍💼 负责人任务完成情况")
             g = df_all.groupby("owner").agg(任务总数=("id", "count"), 平均进度=("progress", "mean")).reset_index()
             g["平均进度"] = g["平均进度"].round(1)
             g.columns = ["负责人", "任务总数", "平均进度(%)"]
-            st.dataframe(g, use_container_width=True, hide_index=True)
+            g_styled = g.style.map(
+                lambda v: "color: #0B5394; font-weight: 600;", subset=["平均进度(%)"]
+            ).format({"平均进度(%)": "{:.1f}%"})
+            st.dataframe(g_styled, use_container_width=True, hide_index=True)
+            if not g.empty:
+                owner_bar = px.bar(
+                    g,
+                    x="负责人",
+                    y="平均进度(%)",
+                    color="平均进度(%)",
+                    color_continuous_scale=["#E53935", "#F6A623", "#43A047"],
+                    text="平均进度(%)",
+                    range_y=[0, 105],
+                )
+                owner_bar.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+                owner_bar.update_layout(
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    showlegend=False,
+                )
+                st.plotly_chart(owner_bar, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown(
+        '<div style="text-align:center; color:#94A3B8; font-size:13px; padding:8px 0;">'
+        '🏭 重型装备车间生产任务进度数字化跟踪平台 · Powered by Streamlit'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 
 if __name__ == "__main__":
