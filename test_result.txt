@@ -1,4 +1,0 @@
-Traceback (most recent call last):
-  File "C:\Users\张童\Desktop\大赛\test_features.py", line 17, in <module>
-    print("\u2705 progress_log 表已创建")
-UnicodeEncodeError: 'gbk' codec can't encode character '\u2705' in position 0: illegal multibyte sequence
