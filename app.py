@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import date, datetime, timedelta
+import calendar as cal_mod
 
 st.set_page_config(page_title="重型装备车间生产任务进度数字化跟踪平台", layout="wide")
 
@@ -119,6 +120,7 @@ def metric_card(label, value, color, icon=""):
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,35 +131,88 @@ def init_db():
             progress INTEGER NOT NULL
         )"""
     )
-    conn.commit()
-    conn.close()
-
-
-def add_task(name, start, end, owner, progress):
-    conn = sqlite3.connect(DB_PATH)
     conn.execute(
-        "INSERT INTO tasks (name, start, end, owner, progress) VALUES (?, ?, ?, ?, ?)",
-        (name, start, end, owner, progress),
+        """CREATE TABLE IF NOT EXISTS progress_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            progress INTEGER NOT NULL,
+            note TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        )"""
     )
     conn.commit()
     conn.close()
 
 
-def update_task(task_id, name, start, end, owner, progress):
+def add_task(name, start, end, owner, progress, note="任务创建"):
     conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        "INSERT INTO tasks (name, start, end, owner, progress) VALUES (?, ?, ?, ?, ?)",
+        (name, start, end, owner, progress),
+    )
+    task_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    log_progress(task_id, progress, note)
+    return task_id
+
+
+def update_task(task_id, name, start, end, owner, progress, note=""):
+    conn = sqlite3.connect(DB_PATH)
+    old_row = conn.execute("SELECT progress FROM tasks WHERE id=?", (task_id,)).fetchone()
     conn.execute(
         "UPDATE tasks SET name=?, start=?, end=?, owner=?, progress=? WHERE id=?",
         (name, start, end, owner, progress, task_id),
     )
     conn.commit()
     conn.close()
+    old_prog = old_row[0] if old_row else None
+    if old_prog != progress or note:
+        auto_note = f"更新进度 {old_prog if old_prog is not None else '?'}% → {progress}%"
+        log_progress(task_id, progress, note or auto_note)
 
 
 def delete_task(task_id):
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("DELETE FROM progress_log WHERE task_id=?", (task_id,))
     conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
     conn.commit()
     conn.close()
+
+
+def log_progress(task_id, progress, note=""):
+    """记录一次进度变更"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO progress_log (task_id, progress, note, created_at) VALUES (?, ?, ?, ?)",
+        (task_id, progress, note, datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_progress_log(task_id=None):
+    """加载进度变更记录；task_id 为 None 时返回全部（关联任务名）"""
+    conn = sqlite3.connect(DB_PATH)
+    if task_id is None:
+        df = pd.read_sql_query(
+            """SELECT pl.id, pl.created_at, pl.task_id, t.name AS task_name,
+                      t.owner, pl.progress, pl.note
+               FROM progress_log pl
+               LEFT JOIN tasks t ON pl.task_id = t.id
+               ORDER BY pl.id DESC""",
+            conn,
+        )
+    else:
+        df = pd.read_sql_query(
+            "SELECT * FROM progress_log WHERE task_id=? ORDER BY id DESC",
+            conn,
+            params=(task_id,),
+        )
+    conn.close()
+    return df
 
 
 def import_tasks(df):
@@ -209,7 +264,7 @@ def import_tasks(df):
                 progress = 0
         else:
             progress = 0
-        add_task(name, start.isoformat(), end.isoformat(), owner, progress)
+        add_task(name, start.isoformat(), end.isoformat(), owner, progress, "批量导入")
         success += 1
     return success, len(df), errors
 
@@ -262,6 +317,58 @@ def make_gantt(df):
     return fig
 
 
+def render_calendar(year, month, df):
+    """渲染指定年月的日历热力图 HTML，返回 HTML 字符串"""
+    if not df.empty:
+        df = df.copy()
+        df["start"] = pd.to_datetime(df["start"])
+        df["end"] = pd.to_datetime(df["end"])
+    cal = cal_mod.Calendar(firstweekday=0)  # 周一开头
+    weeks = cal.monthdayscalendar(year, month)
+    today = date.today()
+
+    def count_active(day):
+        if day == 0 or df.empty:
+            return 0
+        d = pd.Timestamp(year, month, day)
+        return int(((df["start"] <= d) & (df["end"] >= d)).sum())
+
+    parts = ['<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px;">']
+    for wd in ["一", "二", "三", "四", "五", "六", "日"]:
+        parts.append(
+            f'<div style="text-align:center;font-weight:700;color:#475569;'
+            f'padding:8px;background:#E2E8F0;border-radius:6px;">周{wd}</div>'
+        )
+    for week in weeks:
+        for day in week:
+            if day == 0:
+                parts.append('<div style="height:90px;background:transparent;"></div>')
+            else:
+                count = count_active(day)
+                if count == 0:
+                    bg, fg, badge_bg = "#F1F5F9", "#94A3B8", "rgba(148,163,184,0.3)"
+                elif count <= 2:
+                    bg, fg, badge_bg = "#DBEAFE", "#1E40AF", "rgba(255,255,255,0.7)"
+                elif count <= 5:
+                    bg, fg, badge_bg = "#60A5FA", "#FFFFFF", "rgba(255,255,255,0.4)"
+                else:
+                    bg, fg, badge_bg = "#2563EB", "#FFFFFF", "rgba(255,255,255,0.4)"
+                is_today = (year == today.year and month == today.month and day == today.day)
+                border = "3px solid #F6A623" if is_today else "none"
+                parts.append(
+                    f'<div style="height:90px;background:{bg};color:{fg};'
+                    f'border-radius:8px;border:{border};padding:8px;'
+                    f'display:flex;flex-direction:column;justify-content:space-between;">'
+                    f'<div style="font-weight:700;font-size:15px;">{day}</div>'
+                    f'<div style="font-size:12px;align-self:flex-end;'
+                    f'background:{badge_bg};padding:2px 8px;border-radius:10px;'
+                    f'font-weight:600;">{count} 任务</div>'
+                    f'</div>'
+                )
+    parts.append("</div>")
+    return "".join(parts)
+
+
 def main():
     inject_css()
     init_db()
@@ -309,9 +416,62 @@ def main():
     if df_all.empty:
         df = df_all
 
-    tab1, tab2, tab3, tab4 = st.tabs(["任务管理", "进度甘特图", "预警清单", "统计分析"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "📊 数据驾驶舱", "📋 任务管理", "📅 进度甘特图",
+        "⚠️ 预警清单", "📈 统计分析", "📜 进度历史",
+    ])
 
-    with tab1:
+    with tab1:  # 数据驾驶舱
+        st.markdown("#### 📊 生产任务总览")
+        if df_all.empty:
+            st.info("暂无数据，请先在「任务管理」录入任务")
+        else:
+            total = len(df_all)
+            done = int((df_all["progress"] >= 100).sum())
+            done_rate = round(done / total * 100, 1) if total else 0
+            duration = (df_all["end"] - df_all["start"]).dt.days
+            avg_dur = round(duration.mean(), 1)
+            overdue_n = int((df_all["状态"] == "已延期").sum())
+            overdue_rate = round(overdue_n / total * 100, 1) if total else 0
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.markdown(metric_card("任务总数", total, "#0B5394", "📋"), unsafe_allow_html=True)
+            c2.markdown(metric_card("已完成率", f"{done_rate}%", "#43A047", "✅"), unsafe_allow_html=True)
+            c3.markdown(metric_card("平均工期(天)", avg_dur, "#F6A623", "⏱️"), unsafe_allow_html=True)
+            c4.markdown(metric_card("延期率", f"{overdue_rate}%", "#E53935", "🚨"), unsafe_allow_html=True)
+            st.divider()
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                st.markdown("##### 📈 过去 14 天每日活跃任务数")
+                today_d = pd.Timestamp(date.today())
+                last_14 = [today_d - pd.Timedelta(days=i) for i in range(13, -1, -1)]
+                daily = []
+                for d in last_14:
+                    active = int(((df_all["start"] <= d) & (df_all["end"] >= d)).sum())
+                    daily.append({"日期": d.date().isoformat(), "活跃任务数": active})
+                ddf = pd.DataFrame(daily)
+                trend = px.area(ddf, x="日期", y="活跃任务数", markers=True)
+                trend.update_traces(line_color="#1E88E5", fillcolor="rgba(30,136,229,0.2)", marker_size=6)
+                trend.update_layout(
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    xaxis_title="", yaxis_title="活跃任务数",
+                )
+                st.plotly_chart(trend, use_container_width=True)
+            with c2:
+                st.markdown("##### 🏆 负责人 Top 5")
+                g = (df_all.groupby("owner")
+                     .agg(任务数=("id", "count"), 平均进度=("progress", "mean"))
+                     .reset_index()
+                     .sort_values("任务数", ascending=False).head(5))
+                g["平均进度"] = g["平均进度"].round(1)
+                g.columns = ["负责人", "任务数", "平均进度(%)"]
+                g_styled = g.style.format({"平均进度(%)": "{:.1f}%"})
+                st.dataframe(g_styled, use_container_width=True, hide_index=True)
+                st.caption("按任务数排序")
+
+    with tab2:
         col_add, col_edit = st.columns(2)
         with col_add:
             st.markdown("##### ➕ 新增任务")
@@ -346,6 +506,7 @@ def main():
                     e_end = st.date_input("结束时间", value=cur["end"].date())
                     e_owner = st.text_input("负责人", value=cur["owner"])
                     e_progress = st.slider("完成进度（%）", 0, 100, int(cur["progress"]), step=5)
+                    e_note = st.text_input("本次更新备注（可选）", placeholder="例：完成粗车工序、等待外协件")
                     c1, c2 = st.columns(2)
                     do_update = c1.form_submit_button("保存修改", use_container_width=True)
                     do_delete = c2.form_submit_button("删除任务", use_container_width=True)
@@ -355,7 +516,7 @@ def main():
                         elif e_end < e_start:
                             st.error("结束时间不能早于开始时间")
                         else:
-                            update_task(task_id, e_name, e_start.isoformat(), e_end.isoformat(), e_owner, e_progress)
+                            update_task(task_id, e_name, e_start.isoformat(), e_end.isoformat(), e_owner, e_progress, e_note)
                             st.success("修改已保存")
                             st.rerun()
                     if do_delete:
@@ -407,30 +568,96 @@ def main():
                     st.error(f"文件解析失败：{ex}")
                     st.caption("提示：Excel 文件请保存为 .xlsx 格式（WPS/Office 另存为 → Excel 工作簿(*.xlsx)）")
 
-    with tab2:
+    with tab3:
         st.markdown("#### 📅 任务时间线")
         if df.empty:
             st.info("暂无任务数据，请先录入任务")
         else:
-            c1, c2, c3, c4 = st.columns(4)
-            total = len(df)
-            ongoing = int((df["状态"] == "进行中").sum())
-            done = int((df["状态"] == "已完成").sum())
-            avg_prog = int(df["progress"].mean())
-            c1.markdown(metric_card("任务总数", total, "#0B5394", "📊"), unsafe_allow_html=True)
-            c2.markdown(metric_card("进行中", ongoing, "#1E88E5", "⚙️"), unsafe_allow_html=True)
-            c3.markdown(metric_card("已完成", done, "#43A047", "✅"), unsafe_allow_html=True)
-            c4.markdown(metric_card("平均进度", f"{avg_prog}%", "#F6A623", "📈"), unsafe_allow_html=True)
-            st.divider()
-            fig = make_gantt(df)
-            st.plotly_chart(
-                fig,
-                use_container_width=True,
-                config={"toImageButtonOptions": {"format": "png", "scale": 2, "filename": "甘特图"}},
+            view_mode = st.radio(
+                "视图模式",
+                ["📊 甘特图", "🗓️ 日历视图"],
+                horizontal=True,
+                label_visibility="collapsed",
             )
-            st.caption("💡 导出甘特图图片：将鼠标移到图表右上角，点击工具栏中的相机图标即可下载 PNG 图片")
+            st.divider()
+            if view_mode == "📊 甘特图":
+                c1, c2, c3, c4 = st.columns(4)
+                total = len(df)
+                ongoing = int((df["状态"] == "进行中").sum())
+                done = int((df["状态"] == "已完成").sum())
+                avg_prog = int(df["progress"].mean())
+                c1.markdown(metric_card("任务总数", total, "#0B5394", "📊"), unsafe_allow_html=True)
+                c2.markdown(metric_card("进行中", ongoing, "#1E88E5", "⚙️"), unsafe_allow_html=True)
+                c3.markdown(metric_card("已完成", done, "#43A047", "✅"), unsafe_allow_html=True)
+                c4.markdown(metric_card("平均进度", f"{avg_prog}%", "#F6A623", "📈"), unsafe_allow_html=True)
+                st.divider()
+                fig = make_gantt(df)
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    config={"toImageButtonOptions": {"format": "png", "scale": 2, "filename": "甘特图"}},
+                )
+                st.caption("💡 导出甘特图图片：将鼠标移到图表右上角，点击工具栏中的相机图标即可下载 PNG 图片")
+            else:
+                # 日历视图
+                if "cal_year" not in st.session_state:
+                    t = date.today()
+                    st.session_state.cal_year = t.year
+                    st.session_state.cal_month = t.month
 
-    with tab3:
+                c1, c2, c3, c4, c5 = st.columns([1, 1, 3, 1, 1])
+                if c1.button("◀ 上月"):
+                    if st.session_state.cal_month == 1:
+                        st.session_state.cal_month = 12
+                        st.session_state.cal_year -= 1
+                    else:
+                        st.session_state.cal_month -= 1
+                    st.rerun()
+                if c4.button("本月"):
+                    st.session_state.cal_year = date.today().year
+                    st.session_state.cal_month = date.today().month
+                    st.rerun()
+                if c5.button("下月 ▶"):
+                    if st.session_state.cal_month == 12:
+                        st.session_state.cal_month = 1
+                        st.session_state.cal_year += 1
+                    else:
+                        st.session_state.cal_month += 1
+                    st.rerun()
+                c3.markdown(
+                    f"<div style='text-align:center;font-size:22px;font-weight:700;color:#0B5394;'>"
+                    f"📅 {st.session_state.cal_year} 年 {st.session_state.cal_month} 月</div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    render_calendar(st.session_state.cal_year, st.session_state.cal_month, df),
+                    unsafe_allow_html=True,
+                )
+                st.caption("💡 颜色越深表示当天并行执行的任务越多；橙黄边框标记今天")
+                # 当天任务列表
+                st.divider()
+                st.markdown("##### 📋 当月任务汇总")
+                cal_df = df.copy()
+                if not cal_df.empty:
+                    cal_df["start"] = pd.to_datetime(cal_df["start"])
+                    cal_df["end"] = pd.to_datetime(cal_df["end"])
+                    m_start = pd.Timestamp(st.session_state.cal_year, st.session_state.cal_month, 1)
+                    if st.session_state.cal_month == 12:
+                        m_end = pd.Timestamp(st.session_state.cal_year + 1, 1, 1) - pd.Timedelta(days=1)
+                    else:
+                        m_end = pd.Timestamp(st.session_state.cal_year, st.session_state.cal_month + 1, 1) - pd.Timedelta(days=1)
+                    in_month = cal_df[(cal_df["end"] >= m_start) & (cal_df["start"] <= m_end)].copy()
+                    if in_month.empty:
+                        st.info("本月暂无任务")
+                    else:
+                        in_month["start"] = in_month["start"].dt.strftime("%Y-%m-%d")
+                        in_month["end"] = in_month["end"].dt.strftime("%Y-%m-%d")
+                        show = in_month[["name", "start", "end", "owner", "progress", "状态"]]
+                        show.columns = ["任务名称", "开始时间", "结束时间", "负责人", "完成进度(%)", "状态"]
+                        styled = show.style.map(status_pill_css, subset=["状态"]).format({"完成进度(%)": "{:.0f}%"})
+                        st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    with tab4:
         st.markdown("#### ⚠️ 风险预警")
         if df_all.empty:
             st.info("暂无任务数据")
@@ -463,7 +690,7 @@ def main():
                 soon_styled = soon_show.style.format({"完成进度(%)": "{:.0f}%"})
                 st.dataframe(soon_styled, use_container_width=True, hide_index=True)
 
-    with tab4:
+    with tab5:
         st.markdown("#### 📊 数据分析")
         if df_all.empty:
             st.info("暂无任务数据")
@@ -537,6 +764,62 @@ def main():
                     showlegend=False,
                 )
                 st.plotly_chart(owner_bar, use_container_width=True)
+
+    with tab6:  # 进度历史
+        st.markdown("#### 📜 任务进度变更记录")
+        log_df = load_progress_log()
+        if log_df.empty:
+            st.info("暂无进度变更记录。修改任务进度后会自动记录在这里。")
+        else:
+            # 顶部统计
+            c1, c2, c3 = st.columns(3)
+            total_logs = len(log_df)
+            today_n = int((pd.to_datetime(log_df["created_at"]).dt.date == date.today()).sum())
+            affected_tasks = int(log_df["task_id"].nunique())
+            c1.markdown(metric_card("总记录数", total_logs, "#0B5394", "📝"), unsafe_allow_html=True)
+            c2.markdown(metric_card("今日新增", today_n, "#1E88E5", "🆕"), unsafe_allow_html=True)
+            c3.markdown(metric_card("涉及任务", affected_tasks, "#F6A623", "📋"), unsafe_allow_html=True)
+            st.divider()
+            # 过滤
+            fc1, fc2 = st.columns([1, 1])
+            task_filter = fc1.selectbox(
+                "按任务筛选",
+                ["全部"] + sorted(log_df["task_name"].dropna().unique().tolist()),
+            )
+            owner_options = ["全部"] + sorted(log_df["owner"].dropna().unique().tolist())
+            owner_filter = fc2.selectbox("按负责人筛选", owner_options)
+            view = log_df.copy()
+            if task_filter != "全部":
+                view = view[view["task_name"] == task_filter]
+            if owner_filter != "全部":
+                view = view[view["owner"] == owner_filter]
+            st.markdown(f"##### 共 {len(view)} 条记录")
+            if view.empty:
+                st.info("当前筛选条件下无记录")
+            else:
+                view["变更时间"] = pd.to_datetime(view["created_at"]).dt.strftime("%Y-%m-%d %H:%M:%S")
+                show = view[["变更时间", "task_name", "owner", "progress", "note"]].copy()
+                show.columns = ["变更时间", "任务名称", "负责人", "新进度(%)", "备注"]
+                show["新进度(%)"] = show["新进度(%)"].astype(int)
+                # 按进度上色
+                def color_progress(v):
+                    if v >= 100:
+                        return "color: #43A047; font-weight: 700;"
+                    elif v >= 50:
+                        return "color: #1E88E5; font-weight: 600;"
+                    return "color: #94A3B8;"
+
+                styled = show.style.map(color_progress, subset=["新进度(%)"])
+                st.dataframe(styled, use_container_width=True, hide_index=True)
+                # 导出
+                csv = show.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📥 导出变更记录",
+                    csv,
+                    "进度变更记录.csv",
+                    "text/csv",
+                    use_container_width=True,
+                )
 
     st.markdown("---")
     st.markdown(
