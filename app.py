@@ -216,7 +216,7 @@ def load_progress_log(task_id=None):
     return df
 
 
-# ======== AI 智能体模块 ========
+# ======== AI 助手小童 模块 ========
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 LLM_MODEL = "deepseek-chat"
 
@@ -228,8 +228,9 @@ BUILTIN_API_KEY = (
     "71a79a6dc414d9"
 )
 
-SYSTEM_PROMPT = """你是「重型装备车间生产任务数字化跟踪平台」内置的 AI 生产管理助手，
+SYSTEM_PROMPT = """你是「重型装备车间生产任务数字化跟踪平台」内置的 AI 助手，名叫「小童」，
 服务对象是国内重型装备制造企业的车间主任、班组长和生产管理人员。
+用户称呼你为「小童」时，你要自然地回应。
 
 你的能力：
 1. 基于下方【当前任务数据】回答生产进度相关问题（只依据给定数据，不得臆测数据之外的信息）
@@ -370,7 +371,7 @@ def rule_insights(df):
     )
     out.append(
         "\n---\n💡 *当前未配置大模型 API Key，以上为本地规则引擎分析结果。"
-        "在左侧栏填入 DeepSeek API Key 后，即可升级为支持自然语言提问的对话式 AI 智能体。*"
+        "在左侧栏填入 DeepSeek API Key 后，即可升级为支持自然语言提问的对话式 AI 助手小童。*"
     )
     return "\n".join(out)
 
@@ -631,15 +632,15 @@ def main():
             st.metric("筛选结果任务数", len(df))
 
         st.markdown("---")
-        st.markdown("### 🤖 AI 智能体设置")
+        st.markdown("### 🤖 AI助手小童 · 设置")
         st.caption(
-            "填入 DeepSeek API Key 即可启用对话式 AI 助手。"
+            "填入 DeepSeek API Key 即可启用 AI 助手小童。"
             "Key 仅保存在当前浏览器会话中，不会上传 GitHub。"
         )
         _k = st.text_input("DeepSeek API Key", type="password", placeholder="sk-...", key="api_key_input_widget")
         if _k:
             st.session_state.user_api_key = _k
-            st.success("✅ Key 已生效，请前往「AI 智能助手」页使用")
+            st.success("✅ Key 已生效，请前往「AI助手小童」页使用")
         elif st.session_state.get("user_api_key"):
             st.info("已使用当前会话中保存的 Key")
 
@@ -648,7 +649,7 @@ def main():
 
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📊 数据驾驶舱", "📋 任务管理", "📅 进度甘特图",
-        "⚠️ 预警清单", "📈 统计分析", "📜 进度历史", "🤖 AI 智能助手",
+        "⚠️ 预警清单", "📈 统计分析", "📜 进度历史", "🤖 AI助手小童",
     ])
 
     if "chat_messages" not in st.session_state:
@@ -1054,15 +1055,15 @@ def main():
                     use_container_width=True,
                 )
 
-    with tab7:  # AI 智能助手
-        st.markdown("#### 🤖 AI 生产管理助手")
+    with tab7:  # AI助手小童
+        st.markdown("#### 🤖 AI助手小童")
         api_key, key_source = get_api_key()
         if api_key:
             st.markdown(
                 f'<div style="background:#E8F5E9;border-left:4px solid #43A047;padding:12px 16px;'
                 f'border-radius:8px;margin-bottom:14px;color:#1B5E20;font-size:14px;">'
-                f'✅ <b>智能体已就绪</b>（Key 来源：{key_source}）—— 可直接用自然语言提问，'
-                f'例如「哪些任务有延期风险」「谁完成得最好」'
+                f'✅ <b>AI助手小童 已就绪</b>（Key 来源：{key_source}）—— 可直接用自然语言提问，'
+                f'例如「小童，哪些任务有延期风险」「谁完成得最好」'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -1071,7 +1072,7 @@ def main():
                 '<div style="background:#FFF8E1;border-left:4px solid #F6A623;padding:12px 16px;'
                 'border-radius:8px;margin-bottom:14px;color:#7F6000;font-size:14px;">'
                 '⚠️ 未配置大模型 API Key，当前为<b>离线规则分析模式</b>（功能仍可用）。'
-                '在<b>左侧栏</b>填入 DeepSeek API Key 即可升级为对话式 AI 智能体。'
+                '在<b>左侧栏</b>填入 DeepSeek API Key 即可唤醒 AI 助手小童。'
                 '</div>',
                 unsafe_allow_html=True,
             )
@@ -1121,7 +1122,7 @@ def main():
                             ),
                         },
                     ]
-                    with st.spinner("🤖 AI 正在分析数据并生成周报..."):
+                    with st.spinner("🤖 小童正在分析数据并生成周报..."):
                         ok, reply = call_llm(msgs, api_key)
                     if not ok:
                         reply = reply + "\n\n---\n\n" + generate_weekly_report_text(df_all)
@@ -1132,7 +1133,7 @@ def main():
                     ctx = build_data_context(df_all)
                     history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.chat_messages]
                     msgs = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + ctx}] + history
-                    with st.spinner("🤖 AI 正在分析生产数据..."):
+                    with st.spinner("🤖 小童正在分析生产数据..."):
                         ok, reply = call_llm(msgs, api_key)
                     if not ok:
                         reply = reply + "\n\n---\n\n" + rule_insights(df_all)
