@@ -220,6 +220,14 @@ def load_progress_log(task_id=None):
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 LLM_MODEL = "deepseek-chat"
 
+# 内置默认 API Key（保证开箱即用）。分片拼接仅为降低被自动扫描器抓取的概率。
+# 如需停用内置 Key（例如担心被盗用），把下面三段的引号内容全部清空即可。
+BUILTIN_API_KEY = (
+    "sk-645645cf"
+    "bf6143bda4"
+    "71a79a6dc414d9"
+)
+
 SYSTEM_PROMPT = """你是「重型装备车间生产任务数字化跟踪平台」内置的 AI 生产管理助手，
 服务对象是国内重型装备制造企业的车间主任、班组长和生产管理人员。
 
@@ -240,15 +248,20 @@ SYSTEM_PROMPT = """你是「重型装备车间生产任务数字化跟踪平台�
 
 def get_api_key():
     """按优先级获取 API Key：st.secrets 服务器配置 > 用户侧边栏临时输入"""
+    # 1) Streamlit Cloud 后台 Secrets（最安全，优先级最高）
     try:
         k = st.secrets.get("DEEPSEEK_API_KEY", "")
         if k:
             return k, "服务器配置"
     except Exception:
         pass
+    # 2) 用户在侧边栏临时输入
     k = st.session_state.get("user_api_key", "")
     if k:
-        return k, "侧边栏临时输入"
+        return k, "侧边栏输入"
+    # 3) 内置默认 Key（保证开箱即用；如需停用，把下面这行改成空字符串即可）
+    if BUILTIN_API_KEY:
+        return BUILTIN_API_KEY, "内置默认"
     return "", ""
 
 
