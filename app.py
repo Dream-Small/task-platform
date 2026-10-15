@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import date, datetime, timedelta
 import calendar as cal_mod
+import requests
 
 st.set_page_config(page_title="重型装备车间生产任务进度数字化跟踪平台", layout="wide")
 
@@ -215,6 +216,209 @@ def load_progress_log(task_id=None):
     return df
 
 
+# ======== AI 智能体模块 ========
+DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
+LLM_MODEL = "deepseek-chat"
+
+SYSTEM_PROMPT = """你是「重型装备车间生产任务数字化跟踪平台」内置的 AI 生产管理助手，
+服务对象是国内重型装备制造企业的车间主任、班组长和生产管理人员。
+
+你的能力：
+1. 基于下方【当前任务数据】回答生产进度相关问题（只依据给定数据，不得臆测数据之外的信息）
+2. 识别延期风险、进度滞后、人员绩效差异，并给出可执行的补救建议
+3. 生成结构化的生产周报 / 日报
+
+回答要求：
+- 全程使用中文，语气专业干练，像一位有 10 年经验的车间生产主管
+- 涉及具体任务时必须引用真实的编号、名称、负责人
+- 结论先行，再用数据支撑，最后给行动建议
+- 不要输出冗长的免责声明和自我介绍
+- 绝不编造数据中不存在的任务
+
+【重要限制】你是只读顾问：若用户要求新增 / 修改 / 删除任务，明确告知其前往「任务管理」页操作，你不能代劳。"""
+
+
+def get_api_key():
+    """按优先级获取 API Key：st.secrets 服务器配置 > 用户侧边栏临时输入"""
+    try:
+        k = st.secrets.get("DEEPSEEK_API_KEY", "")
+        if k:
+            return k, "服务器配置"
+    except Exception:
+        pass
+    k = st.session_state.get("user_api_key", "")
+    if k:
+        return k, "侧边栏临时输入"
+    return "", ""
+
+
+def call_llm(messages, api_key, timeout=90):
+    """调用大模型 API，返回 (是否成功, 回复内容或错误信息)"""
+    payload = {"model": LLM_MODEL, "messages": messages, "temperature": 0.3, "stream": False}
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    try:
+        resp = requests.post(DEEPSEEK_API_URL, json=payload, headers=headers, timeout=timeout)
+        if resp.status_code == 401:
+            return False, "❌ API Key 无效或已过期，请检查后重试。"
+        if resp.status_code == 402:
+            return False, "❌ API 账户余额不足，请充值后重试。"
+        if resp.status_code == 429:
+            return False, "❌ 请求过于频繁，请稍等几秒再试。"
+        resp.raise_for_status()
+        data = resp.json()
+        return True, data["choices"][0]["message"]["content"]
+    except requests.exceptions.Timeout:
+        return False, "❌ 请求超时（网络较慢），请稍后重试。"
+    except requests.exceptions.ConnectionError:
+        return False, "❌ 网络连接失败，请检查网络后重试。"
+    except Exception as ex:
+        return False, f"❌ 调用失败：{ex}"
+
+
+def build_data_context(df, max_rows=250):
+    """将任务数据压缩为大模型可理解的上下文文本"""
+    if df.empty:
+        return "【当前任务数据】\n系统内暂无任何任务。"
+    today = pd.Timestamp(date.today())
+    counts = df["状态"].value_counts().reindex(STATUS_ORDER, fill_value=0)
+    dur = (df["end"] - df["start"]).dt.days
+    lines = [
+        "【当前任务数据】",
+        f"统计日期：{today.strftime('%Y-%m-%d')}",
+        f"任务总数：{len(df)}",
+        "状态分布："
+        f"未开始 {int(counts['未开始'])} / "
+        f"进行中 {int(counts['进行中'])} / "
+        f"已完成 {int(counts['已完成'])} / "
+        f"已延期 {int(counts['已延期'])}",
+        f"平均工期：{dur.mean():.1f} 天；整体平均进度：{df['progress'].mean():.1f}%",
+        "",
+        "任务明细：",
+    ]
+    for _, r in df.head(max_rows).iterrows():
+        lines.append(
+            f"- #{int(r['id'])} 「{r['name']}」负责人:{r['owner']} "
+            f"周期:{r['start'].strftime('%Y-%m-%d')}~{r['end'].strftime('%Y-%m-%d')} "
+            f"工期:{int((r['end'] - r['start']).days)}天 "
+            f"进度:{int(r['progress'])}% 状态:{r['状态']}"
+        )
+    if len(df) > max_rows:
+        lines.append(f"（共 {len(df)} 条，仅展示前 {max_rows} 条）")
+    return "\n".join(lines)
+
+
+def rule_insights(df):
+    """未配置 API Key 时的本地规则分析（离线智能模式）"""
+    if df.empty:
+        return "系统内暂无任务数据，无法分析。请先在「任务管理」页录入或导入任务。"
+    today = pd.Timestamp(date.today())
+    counts = df["状态"].value_counts().reindex(STATUS_ORDER, fill_value=0)
+    total = len(df)
+    delay = df[df["状态"] == "已延期"]
+    soon = df[(df["end"] >= today) & (df["end"] <= today + pd.Timedelta(days=3)) & (df["progress"] < 100)]
+    g = df.groupby("owner").agg(任务数=("id", "count"), 平均进度=("progress", "mean")).sort_values("平均进度", ascending=False)
+
+    risk = []
+    for _, r in df.iterrows():
+        if r["progress"] >= 100:
+            continue
+        elapsed = (today - r["start"]).days
+        total_days = (r["end"] - r["start"]).days
+        if total_days > 0 and elapsed / total_days > 0.6 and r["progress"] < 60:
+            risk.append(f"- **{r['name']}**（{r['owner']}）：工期已过 {elapsed}/{total_days} 天，进度仅 {int(r['progress'])}%")
+
+    out = [
+        "### 📊 本地智能分析（离线模式）",
+        "",
+        f"**总体概况**：系统内共 **{total}** 个任务；已完成 **{int(counts['已完成'])}** 个"
+        f"（{counts['已完成'] / total * 100:.1f}%），进行中 **{int(counts['进行中'])}** 个，"
+        f"未开始 **{int(counts['未开始'])}** 个。",
+        "",
+    ]
+    if not delay.empty:
+        out.append(f"### 🚨 延期警报（{len(delay)} 个）")
+        for _, r in delay.iterrows():
+            out.append(f"- **{r['name']}**（{r['owner']}）：已超期 **{(today - r['end']).days} 天**，当前进度 {int(r['progress'])}%")
+        out.append("\n> 建议：立即召集班组长碰头会，协调资源抢工或与客户协商调整交付节点。")
+    else:
+        out.append("### ✅ 延期情况\n当前无延期任务，生产执行状况良好。")
+    if not soon.empty:
+        out.append(f"\n### ⏰ 3 日内到期（{len(soon)} 个）")
+        for _, r in soon.iterrows():
+            out.append(f"- **{r['name']}**（{r['owner']}）：还剩 **{(r['end'] - today).days}** 天，进度 {int(r['progress'])}%")
+    if risk:
+        out.append("\n### ⚠️ 进度滞后风险（时间过半但进度不足）")
+        out.extend(risk)
+        out.append("\n> 建议：核查设备状态与外协件是否到位，必要时增派人员或调整工序顺序。")
+    out.append(
+        f"\n### 👨‍💼 人员绩效\n"
+        f"- 进度最快：**{g.index[0]}**（平均 {g.iloc[0]['平均进度']:.1f}%，{int(g.iloc[0]['任务数'])} 个任务）\n"
+        f"- 需重点关注：**{g.index[-1]}**（平均 {g.iloc[-1]['平均进度']:.1f}%，{int(g.iloc[-1]['任务数'])} 个任务）"
+    )
+    out.append(
+        "\n---\n💡 *当前未配置大模型 API Key，以上为本地规则引擎分析结果。"
+        "在左侧栏填入 DeepSeek API Key 后，即可升级为支持自然语言提问的对话式 AI 智能体。*"
+    )
+    return "\n".join(out)
+
+
+def generate_weekly_report_text(df):
+    """本地生成车间生产周报文本（无需 API）"""
+    today = pd.Timestamp(date.today())
+    week_start = today - pd.Timedelta(days=today.weekday())
+    week_end = week_start + pd.Timedelta(days=6)
+    if df.empty or "progress" not in df.columns:
+        return (
+            f"# 车间生产周报（{week_start.strftime('%Y-%m-%d')} ~ {week_end.strftime('%Y-%m-%d')}）\n\n"
+            "系统内暂无任务数据，无法生成周报。请先在「任务管理」页录入或导入任务。"
+        )
+    finished = df[(df["progress"] >= 100) & (df["end"] >= week_start)]
+    started = df[(df["start"] >= week_start) & (df["start"] <= week_end)]
+    delayed = df[df["状态"] == "已延期"]
+    ongoing = df[df["状态"] == "进行中"]
+    next_soon = df[(df["end"] >= today) & (df["end"] <= today + pd.Timedelta(days=7)) & (df["progress"] < 100)]
+
+    lines = [
+        f"# 车间生产周报（{week_start.strftime('%Y-%m-%d')} ~ {week_end.strftime('%Y-%m-%d')}）",
+        "",
+        f"统计日期：{today.strftime('%Y-%m-%d')}　|　系统内任务总数：{len(df)} 个",
+        "",
+        "## 一、本周完成情况",
+    ]
+    if finished.empty:
+        lines.append("- 本周暂无任务完工记录。")
+    else:
+        for _, r in finished.iterrows():
+            lines.append(f"- 【已完工】{r['name']}（{r['owner']}），计划完工 {r['end'].strftime('%m-%d')}，进度 100%")
+    lines.append("\n## 二、本周新开工任务")
+    if started.empty:
+        lines.append("- 本周无新开工任务。")
+    else:
+        for _, r in started.iterrows():
+            lines.append(f"- 【开工】{r['name']}（{r['owner']}），计划周期 {r['start'].strftime('%m-%d')} ~ {r['end'].strftime('%m-%d')}")
+    lines.append("\n## 三、进行中任务")
+    if ongoing.empty:
+        lines.append("- 暂无进行中任务。")
+    else:
+        for _, r in ongoing.head(20).iterrows():
+            lines.append(f"- {r['name']}（{r['owner']}）：进度 {int(r['progress'])}%，计划完工 {r['end'].strftime('%m-%d')}")
+    lines.append("\n## 四、风险提示")
+    if delayed.empty and next_soon.empty:
+        lines.append("- 本周无延期及临期风险，生产秩序正常。")
+    else:
+        for _, r in delayed.iterrows():
+            lines.append(f"- 🔴 **延期**：{r['name']}（{r['owner']}），超期 {(today - r['end']).days} 天，进度 {int(r['progress'])}%")
+        for _, r in next_soon.iterrows():
+            lines.append(f"- 🟡 **临期**：{r['name']}（{r['owner']}），{(r['end'] - today).days} 天后到期，进度 {int(r['progress'])}%")
+    lines.append("\n## 五、下周工作重点")
+    if next_soon.empty:
+        lines.append("- 按现有生产计划正常推进，无紧急交付节点。")
+    else:
+        for _, r in next_soon.head(5).iterrows():
+            lines.append(f"- 重点推进「{r['name']}」（{r['owner']}），确保 {(r['end'] - today).days} 天内交付")
+    return "\n".join(lines)
+
+
 def import_tasks(df):
     """从 DataFrame 批量导入任务（支持 CSV / Excel），返回 (成功数, 总数, 错误列表)"""
     # 列名兼容映射（支持导出格式与常见自定义格式）
@@ -413,13 +617,29 @@ def main():
             df = df[(df["start"] <= hi + pd.Timedelta(days=1)) & (df["end"] >= lo)]
             st.metric("筛选结果任务数", len(df))
 
+        st.markdown("---")
+        st.markdown("### 🤖 AI 智能体设置")
+        st.caption(
+            "填入 DeepSeek API Key 即可启用对话式 AI 助手。"
+            "Key 仅保存在当前浏览器会话中，不会上传 GitHub。"
+        )
+        _k = st.text_input("DeepSeek API Key", type="password", placeholder="sk-...", key="api_key_input_widget")
+        if _k:
+            st.session_state.user_api_key = _k
+            st.success("✅ Key 已生效，请前往「AI 智能助手」页使用")
+        elif st.session_state.get("user_api_key"):
+            st.info("已使用当前会话中保存的 Key")
+
     if df_all.empty:
         df = df_all
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📊 数据驾驶舱", "📋 任务管理", "📅 进度甘特图",
-        "⚠️ 预警清单", "📈 统计分析", "📜 进度历史",
+        "⚠️ 预警清单", "📈 统计分析", "📜 进度历史", "🤖 AI 智能助手",
     ])
+
+    if "chat_messages" not in st.session_state:
+        st.session_state.chat_messages = []
 
     with tab1:  # 数据驾驶舱
         st.markdown("#### 📊 生产任务总览")
@@ -820,6 +1040,94 @@ def main():
                     "text/csv",
                     use_container_width=True,
                 )
+
+    with tab7:  # AI 智能助手
+        st.markdown("#### 🤖 AI 生产管理助手")
+        api_key, key_source = get_api_key()
+        if api_key:
+            st.markdown(
+                f'<div style="background:#E8F5E9;border-left:4px solid #43A047;padding:12px 16px;'
+                f'border-radius:8px;margin-bottom:14px;color:#1B5E20;font-size:14px;">'
+                f'✅ <b>智能体已就绪</b>（Key 来源：{key_source}）—— 可直接用自然语言提问，'
+                f'例如「哪些任务有延期风险」「谁完成得最好」'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div style="background:#FFF8E1;border-left:4px solid #F6A623;padding:12px 16px;'
+                'border-radius:8px;margin-bottom:14px;color:#7F6000;font-size:14px;">'
+                '⚠️ 未配置大模型 API Key，当前为<b>离线规则分析模式</b>（功能仍可用）。'
+                '在<b>左侧栏</b>填入 DeepSeek API Key 即可升级为对话式 AI 智能体。'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+        qa1, qa2, qa3, qa4 = st.columns(4)
+        if qa1.button("📊 生成本周周报", use_container_width=True):
+            st.session_state.ai_preset = "__WEEKLY__"
+        if qa2.button("🚨 风险智能分析", use_container_width=True):
+            st.session_state.ai_preset = (
+                "请全面分析当前生产延期风险：列出所有已延期和进度滞后的任务，"
+                "逐一分析可能原因，并给出可执行的补救建议。请按严重程度排序。"
+            )
+        if qa3.button("👨‍💼 人员绩效点评", use_container_width=True):
+            st.session_state.ai_preset = (
+                "请按负责人对比分析任务完成情况，指出表现突出和需要关注的人，"
+                "结合任务数量与平均进度给出客观的管理建议。"
+            )
+        if qa4.button("🗑️ 清空对话", use_container_width=True):
+            st.session_state.chat_messages = []
+            st.rerun()
+        st.divider()
+
+        # 渲染历史对话
+        for msg in st.session_state.chat_messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        preset = st.session_state.pop("ai_preset", None)
+        user_input = st.chat_input("输入你的问题，例如：这个月谁完成得最好？哪些任务有延期风险？")
+        prompt = preset or user_input
+
+        if prompt:
+            user_display = "📊 生成本周生产周报" if prompt == "__WEEKLY__" else prompt
+            st.session_state.chat_messages.append({"role": "user", "content": user_display})
+
+            if prompt == "__WEEKLY__":
+                if api_key:
+                    ctx = build_data_context(df_all)
+                    msgs = [
+                        {"role": "system", "content": SYSTEM_PROMPT + "\n\n" + ctx},
+                        {
+                            "role": "user",
+                            "content": (
+                                "请基于上述任务数据，生成一份专业的车间生产周报，"
+                                "需包含：本周完成情况、新开工任务、进行中任务、"
+                                "风险提示、下周工作重点五个部分。格式清晰，可直接复制使用。"
+                            ),
+                        },
+                    ]
+                    with st.spinner("🤖 AI 正在分析数据并生成周报..."):
+                        ok, reply = call_llm(msgs, api_key)
+                    if not ok:
+                        reply = reply + "\n\n---\n\n" + generate_weekly_report_text(df_all)
+                else:
+                    reply = generate_weekly_report_text(df_all)
+            else:
+                if api_key:
+                    ctx = build_data_context(df_all)
+                    history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.chat_messages]
+                    msgs = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + ctx}] + history
+                    with st.spinner("🤖 AI 正在分析生产数据..."):
+                        ok, reply = call_llm(msgs, api_key)
+                    if not ok:
+                        reply = reply + "\n\n---\n\n" + rule_insights(df_all)
+                else:
+                    reply = rule_insights(df_all)
+
+            st.session_state.chat_messages.append({"role": "assistant", "content": reply})
+            st.rerun()
 
     st.markdown("---")
     st.markdown(
