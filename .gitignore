@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+# 密钥文件：绝对不能上传到 GitHub
+.streamlit/secrets.toml
+secrets.toml
+.env
