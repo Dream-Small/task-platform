@@ -14,6 +14,21 @@ DB_PATH = "tasks.db"
 STATUS_ORDER = ["未开始", "进行中", "已完成", "已延期"]
 COLOR_MAP = {"未开始": "#9E9E9E", "进行中": "#1E88E5", "已完成": "#43A047", "已延期": "#E53935"}
 
+# 预设工位/设备（贴合重型装备车间实际场景，可自行增删）
+DEFAULT_WORKSTATIONS = [
+    "未分配",
+    "1号加工中心",
+    "2号加工中心",
+    "数控车床区",
+    "龙门铣区",
+    "焊接工位A",
+    "焊接工位B",
+    "热处理炉",
+    "装配工位",
+    "涂装工位",
+    "检测工位",
+]
+
 
 def inject_css():
     st.markdown(
@@ -119,6 +134,15 @@ def metric_card(label, value, color, icon=""):
     )
 
 
+def workstation_options(df=None):
+    """工位/设备下拉选项 = 预设列表 + 数据中已出现的自定义工位"""
+    opts = list(DEFAULT_WORKSTATIONS)
+    if df is not None and not df.empty and "workstation" in df.columns:
+        extra = [w for w in df["workstation"].unique() if w and w not in opts]
+        opts = opts + sorted(extra)
+    return opts
+
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA foreign_keys = ON")
@@ -142,15 +166,23 @@ def init_db():
             FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
         )"""
     )
-    conn.commit()
+    # 迁移：为已有数据库补充「工位/设备」列（只读环境下静默跳过，不影响其他功能）
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+        if "workstation" not in cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN workstation TEXT DEFAULT '未分配'")
+        conn.execute("UPDATE tasks SET workstation='未分配' WHERE workstation IS NULL OR workstation=''")
+        conn.commit()
+    except Exception:
+        pass
     conn.close()
 
 
-def add_task(name, start, end, owner, progress, note="任务创建"):
+def add_task(name, start, end, owner, progress, note="任务创建", workstation="未分配"):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute(
-        "INSERT INTO tasks (name, start, end, owner, progress) VALUES (?, ?, ?, ?, ?)",
-        (name, start, end, owner, progress),
+        "INSERT INTO tasks (name, start, end, owner, progress, workstation) VALUES (?, ?, ?, ?, ?, ?)",
+        (name, start, end, owner, progress, workstation or "未分配"),
     )
     task_id = cur.lastrowid
     conn.commit()
@@ -159,12 +191,12 @@ def add_task(name, start, end, owner, progress, note="任务创建"):
     return task_id
 
 
-def update_task(task_id, name, start, end, owner, progress, note=""):
+def update_task(task_id, name, start, end, owner, progress, note="", workstation="未分配"):
     conn = sqlite3.connect(DB_PATH)
     old_row = conn.execute("SELECT progress FROM tasks WHERE id=?", (task_id,)).fetchone()
     conn.execute(
-        "UPDATE tasks SET name=?, start=?, end=?, owner=?, progress=? WHERE id=?",
-        (name, start, end, owner, progress, task_id),
+        "UPDATE tasks SET name=?, start=?, end=?, owner=?, progress=?, workstation=? WHERE id=?",
+        (name, start, end, owner, progress, workstation or "未分配", task_id),
     )
     conn.commit()
     conn.close()
@@ -179,6 +211,14 @@ def delete_task(task_id):
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("DELETE FROM progress_log WHERE task_id=?", (task_id,))
     conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+    conn.commit()
+    conn.close()
+
+
+def set_workstation(task_id, workstation):
+    """单独更新任务所属工位/设备"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE tasks SET workstation=? WHERE id=?", (workstation or "未分配", task_id))
     conn.commit()
     conn.close()
 
@@ -235,7 +275,8 @@ SYSTEM_PROMPT = """你是「重型装备车间生产任务数字化跟踪平台�
 你的能力：
 1. 基于下方【当前任务数据】回答生产进度相关问题（只依据给定数据，不得臆测数据之外的信息）
 2. 识别延期风险、进度滞后、人员绩效差异，并给出可执行的补救建议
-3. 生成结构化的生产周报 / 日报
+3. 分析各工位 / 设备的负荷与产能瓶颈，给出排产与资源调配建议
+4. 生成结构化的生产周报 / 日报
 
 回答要求：
 - 全程使用中文，语气专业干练，像一位有 10 年经验的车间生产主管
@@ -310,8 +351,10 @@ def build_data_context(df, max_rows=250):
         "任务明细：",
     ]
     for _, r in df.head(max_rows).iterrows():
+        ws = r["workstation"] if "workstation" in df.columns else "未分配"
         lines.append(
             f"- #{int(r['id'])} 「{r['name']}」负责人:{r['owner']} "
+            f"工位:{ws} "
             f"周期:{r['start'].strftime('%Y-%m-%d')}~{r['end'].strftime('%Y-%m-%d')} "
             f"工期:{int((r['end'] - r['start']).days)}天 "
             f"进度:{int(r['progress'])}% 状态:{r['状态']}"
@@ -449,6 +492,8 @@ def import_tasks(df):
             col_map[c] = "owner"
         elif cs.replace(" ", "") in ("完成进度(%)", "完成进度", "进度", "progress"):
             col_map[c] = "progress"
+        elif cs in ("工位", "设备", "工位/设备", "所在工位", "workstation", "machine"):
+            col_map[c] = "workstation"
     df = df.rename(columns=col_map)
     required = ["name", "start", "end", "owner"]
     missing = [r for r in required if r not in df.columns]
@@ -482,7 +527,8 @@ def import_tasks(df):
                 progress = 0
         else:
             progress = 0
-        add_task(name, start.isoformat(), end.isoformat(), owner, progress, "批量导入")
+        ws = str(row["workstation"]).strip() if ("workstation" in df.columns and pd.notna(row["workstation"])) else ""
+        add_task(name, start.isoformat(), end.isoformat(), owner, progress, "批量导入", ws or "未分配")
         success += 1
     return success, len(df), errors
 
@@ -495,6 +541,10 @@ def load_tasks():
         return df
     df["start"] = pd.to_datetime(df["start"])
     df["end"] = pd.to_datetime(df["end"])
+    if "workstation" not in df.columns:
+        df["workstation"] = "未分配"
+    df["workstation"] = df["workstation"].fillna("未分配").astype(str)
+    df.loc[df["workstation"].str.strip() == "", "workstation"] = "未分配"
     today = pd.Timestamp(date.today())
     status_list = []
     for _, row in df.iterrows():
@@ -612,6 +662,7 @@ def main():
             kw = st.text_input("按任务名称/负责人搜索")
             f_owner = st.selectbox("负责人", owner_opt)
             f_status = st.selectbox("任务状态", status_opt)
+            f_ws = st.selectbox("工位 / 设备", ["全部"] + workstation_options(df_all))
             f_range = st.date_input(
                 "时间范围筛选（起止日期）",
                 value=(df_all["start"].min().date(), df_all["end"].max().date()),
@@ -628,6 +679,8 @@ def main():
                 df = df[df["owner"] == f_owner]
             if f_status != "全部":
                 df = df[df["状态"] == f_status]
+            if f_ws != "全部":
+                df = df[df["workstation"] == f_ws]
             df = df[(df["start"] <= hi + pd.Timedelta(days=1)) & (df["end"] >= lo)]
             st.metric("筛选结果任务数", len(df))
 
@@ -647,10 +700,143 @@ def main():
     if df_all.empty:
         df = df_all
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "📊 数据驾驶舱", "📋 任务管理", "📅 进度甘特图",
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+        "📊 数据驾驶舱", "🏭 设备负荷", "📋 任务管理", "📅 进度甘特图",
         "⚠️ 预警清单", "📈 统计分析", "📜 进度历史", "🤖 AI助手小童",
     ])
+
+    with tab2:  # 设备 / 工位负荷看板
+        st.markdown("#### 🏭 设备 / 工位负荷看板")
+        if df_all.empty:
+            st.info("暂无任务数据，请先在「任务管理」页录入任务并指定工位")
+        else:
+            today = pd.Timestamp(date.today())
+
+            # 存在未分配工位的任务 → 提供批量快速分配
+            unassigned = df_all[df_all["workstation"] == "未分配"]
+            if not unassigned.empty:
+                with st.expander(
+                    f"⚡ {len(unassigned)} 个任务尚未指定工位，点此快速分配",
+                    expanded=(len(unassigned) == len(df_all)),
+                ):
+                    st.caption("为每个任务选择工位后点「保存工位分配」，下方看板即可显示负荷情况。")
+                    ws_pick_opts = [w for w in workstation_options(df_all) if w != "未分配"]
+                    picks = {}
+                    for _, r in unassigned.iterrows():
+                        tid = int(r["id"])
+                        picks[tid] = st.selectbox(
+                            f"#{tid}　{r['name']}（负责人：{r['owner']}）",
+                            ws_pick_opts,
+                            key=f"ws_pick_{tid}",
+                        )
+                    if st.button("💾 保存工位分配", use_container_width=True, key="save_ws_batch"):
+                        for tid, w in picks.items():
+                            set_workstation(tid, w)
+                        st.success(f"✅ 已为 {len(picks)} 个任务分配工位")
+                        st.rerun()
+
+            ws_used = [w for w in df_all["workstation"].unique() if w and w != "未分配"]
+            if not ws_used:
+                st.warning("当前所有任务均未分配工位，请先在上方（或「任务管理」页）为任务指定工位/设备。")
+            else:
+                # ---- KPI ----
+                running, idle, overload = 0, 0, 0
+                rows = []
+                for w in sorted(ws_used):
+                    sub = df_all[df_all["workstation"] == w]
+                    active = sub[(sub["start"] <= today) & (sub["end"] >= today) & (sub["progress"] < 100)]
+                    n_active = len(active)
+                    if n_active == 0:
+                        idle += 1
+                        state = "⚪ 空闲"
+                    elif n_active >= 3:
+                        overload += 1
+                        running += 1
+                        state = "🔴 超载"
+                    else:
+                        running += 1
+                        state = "🔵 运行中"
+                    rows.append({
+                        "工位/设备": w,
+                        "任务总数": len(sub),
+                        "当前在制": n_active,
+                        "平均进度(%)": round(float(sub["progress"].mean()), 1),
+                        "延期任务": int((sub["状态"] == "已延期").sum()),
+                        "状态": state,
+                    })
+                c1, c2, c3, c4 = st.columns(4)
+                c1.markdown(metric_card("在册工位/设备", len(ws_used), "#0B5394", "🏭"), unsafe_allow_html=True)
+                c2.markdown(metric_card("运行中", running, "#1E88E5", "🔵"), unsafe_allow_html=True)
+                c3.markdown(metric_card("空闲", idle, "#43A047", "⚪"), unsafe_allow_html=True)
+                c4.markdown(metric_card("超载(≥3并行)", overload, "#E53935", "🔴"), unsafe_allow_html=True)
+                st.divider()
+
+                # ---- 未来 14 天负荷热力图 ----
+                st.markdown("##### 🔥 未来 14 天工位负荷热力图")
+                days = [today + pd.Timedelta(days=i) for i in range(14)]
+                y_labels = [r["工位/设备"] for r in rows]
+                matrix = []
+                for w in y_labels:
+                    sub = df_all[df_all["workstation"] == w]
+                    matrix.append([
+                        int(((sub["start"] <= d) & (sub["end"] >= d)).sum()) for d in days
+                    ])
+                heat = go.Figure(data=go.Heatmap(
+                    z=matrix,
+                    x=[d.strftime("%m-%d") for d in days],
+                    y=y_labels,
+                    colorscale=[[0, "#F1F5F9"], [0.25, "#DBEAFE"], [0.5, "#60A5FA"], [1.0, "#1E3A8A"]],
+                    text=matrix,
+                    texttemplate="%{text}",
+                    textfont={"size": 11},
+                    colorbar=dict(title="并行任务数"),
+                    hovertemplate="%{y}<br>%{x}<br>并行任务：%{z} 个<extra></extra>",
+                ))
+                heat.update_layout(
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    xaxis_title="", yaxis_title="",
+                    height=max(260, 34 * len(y_labels) + 90),
+                )
+                st.plotly_chart(heat, use_container_width=True)
+                st.caption("💡 颜色越深表示该工位当天并行任务越多，可据此提前发现产能瓶颈。")
+
+                # ---- 工位负荷明细 ----
+                st.divider()
+                st.markdown("##### 📋 工位负荷明细")
+                wl_df = pd.DataFrame(rows)
+
+                def color_state(v):
+                    if "超载" in str(v):
+                        return "color: #E53935; font-weight: 700;"
+                    if "运行中" in str(v):
+                        return "color: #1E88E5; font-weight: 600;"
+                    return "color: #94A3B8;"
+
+                st.dataframe(
+                    wl_df.style.map(color_state, subset=["状态"]).format({"平均进度(%)": "{:.1f}%"}),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                # ---- 当前在制任务 ----
+                st.divider()
+                st.markdown("##### ⚙️ 当前在制任务（按工位）")
+                in_prog = df_all[
+                    (df_all["start"] <= today) & (df_all["end"] >= today) & (df_all["progress"] < 100)
+                ].copy()
+                if in_prog.empty:
+                    st.info("当前没有正在执行的任务。")
+                else:
+                    in_prog["开始时间"] = in_prog["start"].dt.strftime("%Y-%m-%d")
+                    in_prog["结束时间"] = in_prog["end"].dt.strftime("%Y-%m-%d")
+                    ip_show = in_prog[["workstation", "name", "owner", "开始时间", "结束时间", "progress", "状态"]].copy()
+                    ip_show.columns = ["工位/设备", "任务名称", "负责人", "开始时间", "结束时间", "完成进度(%)", "状态"]
+                    st.dataframe(
+                        ip_show.style.map(status_pill_css, subset=["状态"]).format({"完成进度(%)": "{:.0f}%"}),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
     if "chat_messages" not in st.session_state:
         st.session_state.chat_messages = []
@@ -705,7 +891,7 @@ def main():
                 st.dataframe(g_styled, use_container_width=True, hide_index=True)
                 st.caption("按任务数排序")
 
-    with tab2:
+    with tab3:
         col_add, col_edit = st.columns(2)
         with col_add:
             st.markdown("##### ➕ 新增任务")
@@ -714,6 +900,7 @@ def main():
                 start = st.date_input("开始时间", value=date.today())
                 end = st.date_input("结束时间", value=date.today() + timedelta(days=7))
                 owner = st.text_input("负责人")
+                ws = st.selectbox("工位 / 设备", workstation_options(df_all))
                 progress = st.slider("完成进度（%）", 0, 100, 0, step=5)
                 submitted = st.form_submit_button("添加任务", use_container_width=True)
                 if submitted:
@@ -722,7 +909,7 @@ def main():
                     elif end < start:
                         st.error("结束时间不能早于开始时间")
                     else:
-                        add_task(name, start.isoformat(), end.isoformat(), owner, progress)
+                        add_task(name, start.isoformat(), end.isoformat(), owner, progress, "任务创建", ws)
                         st.success(f"任务「{name}」添加成功")
                         st.rerun()
         with col_edit:
@@ -739,6 +926,9 @@ def main():
                     e_start = st.date_input("开始时间", value=cur["start"].date())
                     e_end = st.date_input("结束时间", value=cur["end"].date())
                     e_owner = st.text_input("负责人", value=cur["owner"])
+                    _ws_opts = workstation_options(df_all)
+                    _cur_ws = cur["workstation"] if cur["workstation"] in _ws_opts else "未分配"
+                    e_ws = st.selectbox("工位 / 设备", _ws_opts, index=_ws_opts.index(_cur_ws))
                     e_progress = st.slider("完成进度（%）", 0, 100, int(cur["progress"]), step=5)
                     e_note = st.text_input("本次更新备注（可选）", placeholder="例：完成粗车工序、等待外协件")
                     c1, c2 = st.columns(2)
@@ -750,7 +940,7 @@ def main():
                         elif e_end < e_start:
                             st.error("结束时间不能早于开始时间")
                         else:
-                            update_task(task_id, e_name, e_start.isoformat(), e_end.isoformat(), e_owner, e_progress, e_note)
+                            update_task(task_id, e_name, e_start.isoformat(), e_end.isoformat(), e_owner, e_progress, e_note, e_ws)
                             st.success("修改已保存")
                             st.rerun()
                     if do_delete:
@@ -762,20 +952,21 @@ def main():
         if df.empty:
             st.info("暂无符合条件的任务")
         else:
-            show = df[["id", "name", "start", "end", "owner", "progress", "状态"]].copy()
-            show.columns = ["编号", "任务名称", "开始时间", "结束时间", "负责人", "完成进度(%)", "状态"]
+            show = df[["id", "name", "start", "end", "owner", "workstation", "progress", "状态"]].copy()
+            show.columns = ["编号", "任务名称", "开始时间", "结束时间", "负责人", "工位/设备", "完成进度(%)", "状态"]
             show["开始时间"] = show["开始时间"].dt.strftime("%Y-%m-%d")
             show["结束时间"] = show["结束时间"].dt.strftime("%Y-%m-%d")
             styled = show.style.map(status_pill_css, subset=["状态"]).format({"完成进度(%)": "{:.0f}%"})
             st.dataframe(styled, use_container_width=True, hide_index=True)
-            csv_data = df[["id", "name", "start", "end", "owner", "progress", "状态"]].to_csv(index=False).encode("utf-8-sig")
+            csv_data = df[["id", "name", "start", "end", "owner", "workstation", "progress", "状态"]].to_csv(index=False).encode("utf-8-sig")
             st.download_button("📥 导出任务CSV", csv_data, "生产任务清单.csv", "text/csv", use_container_width=True)
 
         st.markdown("##### 📤 导入任务")
         with st.expander("从 CSV / Excel 文件批量导入任务"):
             st.caption(
                 "支持 Excel（.xlsx / .xls）和 CSV（.csv）文件。"
-                "列名支持：任务名称、开始时间、结束时间、负责人、完成进度(%)，与导出格式一致（编号、状态列自动忽略）。"
+                "列名支持：任务名称、开始时间、结束时间、负责人、工位/设备、完成进度(%)，"
+                "与导出格式一致（编号、状态列自动忽略）；不填工位则记为「未分配」。"
             )
             if "import_done" in st.session_state:
                 ok, total, errs = st.session_state.pop("import_done")
@@ -802,7 +993,7 @@ def main():
                     st.error(f"文件解析失败：{ex}")
                     st.caption("提示：Excel 文件请保存为 .xlsx 格式（WPS/Office 另存为 → Excel 工作簿(*.xlsx)）")
 
-    with tab3:
+    with tab4:
         st.markdown("#### 📅 任务时间线")
         if df.empty:
             st.info("暂无任务数据，请先录入任务")
@@ -891,7 +1082,7 @@ def main():
                         styled = show.style.map(status_pill_css, subset=["状态"]).format({"完成进度(%)": "{:.0f}%"})
                         st.dataframe(styled, use_container_width=True, hide_index=True)
 
-    with tab4:
+    with tab5:
         st.markdown("#### ⚠️ 风险预警")
         if df_all.empty:
             st.info("暂无任务数据")
@@ -924,7 +1115,7 @@ def main():
                 soon_styled = soon_show.style.format({"完成进度(%)": "{:.0f}%"})
                 st.dataframe(soon_styled, use_container_width=True, hide_index=True)
 
-    with tab5:
+    with tab6:
         st.markdown("#### 📊 数据分析")
         if df_all.empty:
             st.info("暂无任务数据")
@@ -999,7 +1190,7 @@ def main():
                 )
                 st.plotly_chart(owner_bar, use_container_width=True)
 
-    with tab6:  # 进度历史
+    with tab7:  # 进度历史
         st.markdown("#### 📜 任务进度变更记录")
         log_df = load_progress_log()
         if log_df.empty:
@@ -1055,7 +1246,7 @@ def main():
                     use_container_width=True,
                 )
 
-    with tab7:  # AI助手小童
+    with tab8:  # AI助手小童
         st.markdown("#### 🤖 AI助手小童")
         api_key, key_source = get_api_key()
         if api_key:
