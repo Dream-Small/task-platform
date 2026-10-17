@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 import calendar as cal_mod
 import requests
 import json
+import html
 
 st.set_page_config(page_title="重型装备车间生产任务进度数字化跟踪平台", layout="wide")
 
@@ -29,6 +30,13 @@ DEFAULT_WORKSTATIONS = [
     "涂装工位",
     "检测工位",
 ]
+
+# 数字孪生车间：工位色块背景（按实时负荷状态）
+DT_BG = {
+    "空闲": "linear-gradient(135deg,#94A3B8 0%,#64748B 100%)",
+    "运行中": "linear-gradient(135deg,#42A5F5 0%,#1565C0 100%)",
+    "超载": "linear-gradient(135deg,#EF5350 0%,#C62828 100%)",
+}
 
 
 def inject_css():
@@ -60,6 +68,27 @@ section[data-testid="stSidebar"] {
 section[data-testid="stSidebar"] h1,
 section[data-testid="stSidebar"] h2,
 section[data-testid="stSidebar"] h3 {color: #0B5394;}
+/* 车间数字孪生平面图 */
+.ws-map { background: linear-gradient(135deg,#F8FAFC 0%,#EEF2F7 100%);
+    border: 2px solid #CBD5E1; border-radius: 14px; padding: 16px; }
+.ws-title { font-size: 13px; color: #64748B; font-weight: 700; margin-bottom: 11px; letter-spacing: 1px; }
+.ws-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px,1fr)); gap: 11px; }
+.ws-cell { border-radius: 11px; padding: 11px 13px; color: #fff; min-height: 94px;
+    box-shadow: 0 2px 8px rgba(15,23,42,.18); display: flex; flex-direction: column;
+    justify-content: space-between; transition: transform .15s, box-shadow .15s; }
+.ws-cell:hover { transform: translateY(-3px); box-shadow: 0 8px 18px rgba(15,23,42,.28); }
+.ws-name { font-size: 14px; font-weight: 700; line-height: 1.25; }
+.ws-stat { font-size: 12px; opacity: .93; margin-top: 5px; }
+.ws-badge { display: inline-block; font-size: 11px; background: rgba(255,255,255,.26);
+    border-radius: 20px; padding: 2px 10px; align-self: flex-start; margin-top: 7px; }
+.ws-zone { background: repeating-linear-gradient(45deg,#F1F5F9,#F1F5F9 8px,#E2E8F0 8px,#E2E8F0 16px);
+    border: 1.5px dashed #94A3B8; border-radius: 11px; padding: 11px 13px; color: #64748B;
+    min-height: 94px; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; font-size: 13px; font-weight: 600; text-align: center; }
+.ws-legend { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 13px; padding-top: 11px;
+    border-top: 1px solid #E2E8F0; font-size: 12px; color: #475569; }
+.ws-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.ws-dot { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
 /* 侧边栏导航菜单：卡片化 */
 section[data-testid="stSidebar"] div[role="radiogroup"] > label {
     display: flex; align-items: center; gap: 8px;
@@ -779,6 +808,7 @@ def main():
                 "📊 数据驾驶舱",
                 "📋 任务管理",
                 "🏭 设备负荷",
+                "🗺️ 车间数字孪生",
                 "📅 进度甘特图",
                 "📈 统计分析",
                 "⚠️ 预警清单",
@@ -1171,6 +1201,120 @@ def main():
                                 st.rerun()
                     except Exception as ex:
                         st.error(f"备份文件解析失败：{ex}")
+
+    elif page == "🗺️ 车间数字孪生":
+        st.markdown("#### 🗺️ 车间数字孪生 · 实时布局看板")
+        st.caption("以 2D 数字孪生方式呈现车间工位实时状态，颜色反映各工位当前负荷与运行情况。")
+        if df_all.empty:
+            st.info("暂无任务数据，请先在「任务管理」页录入任务")
+        else:
+            today = pd.Timestamp(date.today())
+            ws_used = sorted([w for w in df_all["workstation"].unique() if w and w != "未分配"])
+            if not ws_used:
+                st.warning(
+                    "当前所有任务均未分配工位，无法生成车间布局图。"
+                    "请先在「🏭 设备负荷」页为任务快速分配工位。"
+                )
+            else:
+                # 各工位实时状态统计
+                info = {}
+                for w in ws_used:
+                    sub = df_all[df_all["workstation"] == w]
+                    active = sub[
+                        (sub["start"] <= today) & (sub["end"] >= today) & (sub["progress"] < 100)
+                    ]
+                    n = len(active)
+                    state = "空闲" if n == 0 else ("超载" if n >= 3 else "运行中")
+                    tip_lines = [f"在制 {n} 个 / 累计 {len(sub)} 个"]
+                    if n:
+                        for _, r in active.iterrows():
+                            tip_lines.append(f"· {r['name']}（{r['owner']} {int(r['progress'])}%）")
+                    else:
+                        tip_lines.append("当前无在制任务")
+                    info[w] = {
+                        "state": state,
+                        "n": n,
+                        "total": len(sub),
+                        "tip": f"{w}｜{state}\n" + "\n".join(tip_lines),
+                        "avg": round(float(sub["progress"].mean()), 1),
+                    }
+
+                n_idle = sum(1 for v in info.values() if v["state"] == "空闲")
+                n_run = sum(1 for v in info.values() if v["state"] == "运行中")
+                n_over = sum(1 for v in info.values() if v["state"] == "超载")
+                util = (n_run + n_over) / len(ws_used) * 100
+
+                d1, d2, d3, d4 = st.columns(4)
+                d1.markdown(metric_card("车间工位数", len(ws_used), "#0B5394", "🏭"), unsafe_allow_html=True)
+                d2.markdown(metric_card("运行中", n_run, "#1E88E5", "🔵"), unsafe_allow_html=True)
+                d3.markdown(metric_card("超载告警", n_over, "#E53935", "🔴"), unsafe_allow_html=True)
+                d4.markdown(metric_card("工位利用率", f"{util:.0f}%", "#F6A623", "📈"), unsafe_allow_html=True)
+                st.divider()
+
+                # 组装 2D 车间平面图
+                cells = [
+                    '<div class="ws-zone"><div>⬛</div><div>原料 / 毛坯</div><div>暂存区</div></div>'
+                ]
+                for w in ws_used:
+                    v = info[w]
+                    bg = DT_BG[v["state"]]
+                    tip = html.escape(v["tip"])
+                    cells.append(
+                        f'<div class="ws-cell" style="background:{bg};" title="{tip}">'
+                        f'<div class="ws-name">{html.escape(w)}</div>'
+                        f'<div class="ws-stat">在制 {v["n"]} 个 · 累计 {v["total"]} 个</div>'
+                        f'<div class="ws-stat">平均进度 {v["avg"]:.0f}%</div>'
+                        f'<span class="ws-badge">{v["state"]}</span>'
+                        f"</div>"
+                    )
+                cells.append(
+                    '<div class="ws-zone"><div>📦</div><div>成品 / 发货</div><div>暂存区</div></div>'
+                )
+                legend = (
+                    '<div class="ws-legend">'
+                    '<span><i class="ws-dot" style="background:#7A8CA3;"></i>空闲（无在制任务）</span>'
+                    '<span><i class="ws-dot" style="background:#1E88E5;"></i>运行中（1-2 个并行）</span>'
+                    '<span><i class="ws-dot" style="background:#E53935;"></i>超载（≥3 个并行）</span>'
+                    '<span>🖱️ 鼠标悬停色块可查看该工位当前在制任务</span>'
+                    "</div>"
+                )
+                st.markdown(
+                    '<div class="ws-map">'
+                    '<div class="ws-title">重型装备生产车间 · 实时布局数字孪生</div>'
+                    f'<div class="ws-grid">{"".join(cells)}</div>{legend}</div>',
+                    unsafe_allow_html=True,
+                )
+                st.caption(
+                    f"🕐 数据快照：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    "　|　色块随任务数据实时更新，橙色利用率 =（运行中+超载）/ 工位数"
+                )
+
+                # 工位详情
+                st.divider()
+                st.markdown("##### 🔍 工位详情")
+                sel = st.selectbox("选择工位，查看该工位当前在制任务", ws_used, key="dt_ws_sel")
+                cur = df_all[
+                    (df_all["workstation"] == sel)
+                    & (df_all["start"] <= today)
+                    & (df_all["end"] >= today)
+                    & (df_all["progress"] < 100)
+                ].copy()
+                if cur.empty:
+                    v = info[sel]
+                    st.info(
+                        f"「{sel}」当前无在制任务，处于**空闲**状态"
+                        f"（累计承接 {v['total']} 个任务，平均进度 {v['avg']:.0f}%）。"
+                    )
+                else:
+                    cur["开始时间"] = cur["start"].dt.strftime("%Y-%m-%d")
+                    cur["结束时间"] = cur["end"].dt.strftime("%Y-%m-%d")
+                    dt_show = cur[["id", "name", "owner", "开始时间", "结束时间", "progress", "状态"]].copy()
+                    dt_show.columns = ["编号", "任务名称", "负责人", "开始时间", "结束时间", "完成进度(%)", "状态"]
+                    st.dataframe(
+                        dt_show.style.map(status_pill_css, subset=["状态"]).format({"完成进度(%)": "{:.0f}%"}),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
     elif page == "📅 进度甘特图":
         st.markdown("#### 📅 任务时间线")
