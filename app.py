@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from datetime import date, datetime, timedelta
 import calendar as cal_mod
 import requests
+import json
 
 st.set_page_config(page_title="重型装备车间生产任务进度数字化跟踪平台", layout="wide")
 
@@ -59,6 +60,24 @@ section[data-testid="stSidebar"] {
 section[data-testid="stSidebar"] h1,
 section[data-testid="stSidebar"] h2,
 section[data-testid="stSidebar"] h3 {color: #0B5394;}
+/* 侧边栏导航菜单：卡片化 */
+section[data-testid="stSidebar"] div[role="radiogroup"] > label {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 14px; border-radius: 9px; margin-bottom: 3px;
+    cursor: pointer; transition: all 0.15s ease;
+    font-size: 14px; color: #334155;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label:hover {
+    background: rgba(30,136,229,0.10);
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] input[type="radio"] {
+    position: absolute; opacity: 0;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) {
+    background: linear-gradient(135deg, #0B5394 0%, #1976D2 100%);
+    color: #fff !important; font-weight: 600;
+    box-shadow: 0 2px 8px rgba(11,83,148,0.25);
+}
 /* Tab 样式 */
 .stTabs [data-baseweb="tab-list"] {
     gap: 4px;
@@ -191,12 +210,17 @@ def add_task(name, start, end, owner, progress, note="任务创建", workstation
     return task_id
 
 
-def update_task(task_id, name, start, end, owner, progress, note="", workstation="未分配"):
+def update_task(task_id, name, start, end, owner, progress, note="", workstation=None):
+    """workstation 为 None 表示「不修改」，保留原工位（避免调用方漏传导致工位被清空）"""
     conn = sqlite3.connect(DB_PATH)
-    old_row = conn.execute("SELECT progress FROM tasks WHERE id=?", (task_id,)).fetchone()
+    old_row = conn.execute("SELECT progress, workstation FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if workstation is None:
+        ws = (old_row[1] if old_row and old_row[1] else "未分配")
+    else:
+        ws = workstation or "未分配"
     conn.execute(
         "UPDATE tasks SET name=?, start=?, end=?, owner=?, progress=?, workstation=? WHERE id=?",
-        (name, start, end, owner, progress, workstation or "未分配", task_id),
+        (name, start, end, owner, progress, ws, task_id),
     )
     conn.commit()
     conn.close()
@@ -221,6 +245,101 @@ def set_workstation(task_id, workstation):
     conn.execute("UPDATE tasks SET workstation=? WHERE id=?", (workstation or "未分配", task_id))
     conn.commit()
     conn.close()
+
+
+def export_backup():
+    """导出完整数据备份（任务 + 进度历史），返回可 JSON 序列化的 dict"""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        tasks = pd.read_sql_query("SELECT * FROM tasks ORDER BY id", conn)
+        logs = pd.read_sql_query("SELECT * FROM progress_log ORDER BY id", conn)
+    finally:
+        conn.close()
+    return {
+        "format": "heavy-equipment-workshop-backup",
+        "version": 1,
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "task_count": len(tasks),
+        "log_count": len(logs),
+        "tasks": tasks.to_dict("records"),
+        "progress_log": logs.to_dict("records"),
+    }
+
+
+def restore_backup(data, mode="replace"):
+    """恢复备份。
+
+    mode="replace"：清空现有数据后按原 id 恢复
+    mode="merge"  ：保留现有数据，追加备份内容（重新分配 id 并修正历史关联）
+    返回 (任务数, 历史数, 错误信息)
+    """
+    if not isinstance(data, dict) or "tasks" not in data:
+        return 0, 0, "备份文件格式不正确，缺少 tasks 字段"
+    tasks = data.get("tasks") or []
+    logs = data.get("progress_log") or []
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("BEGIN")
+        if mode == "replace":
+            conn.execute("DELETE FROM progress_log")
+            conn.execute("DELETE FROM tasks")
+            for t in tasks:
+                conn.execute(
+                    "INSERT INTO tasks (id, name, start, end, owner, progress, workstation) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (
+                        t.get("id"),
+                        t.get("name"),
+                        t.get("start"),
+                        t.get("end"),
+                        t.get("owner"),
+                        int(t.get("progress", 0)),
+                        t.get("workstation") or "未分配",
+                    ),
+                )
+            for l in logs:
+                conn.execute(
+                    "INSERT INTO progress_log (id, task_id, progress, note, created_at) VALUES (?,?,?,?,?)",
+                    (
+                        l.get("id"),
+                        l.get("task_id"),
+                        int(l.get("progress", 0)),
+                        l.get("note", ""),
+                        l.get("created_at"),
+                    ),
+                )
+        else:  # merge：重新分配 id，并修正历史记录的关联
+            id_map = {}
+            for t in tasks:
+                cur = conn.execute(
+                    "INSERT INTO tasks (name, start, end, owner, progress, workstation) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (
+                        t.get("name"),
+                        t.get("start"),
+                        t.get("end"),
+                        t.get("owner"),
+                        int(t.get("progress", 0)),
+                        t.get("workstation") or "未分配",
+                    ),
+                )
+                id_map[t.get("id")] = cur.lastrowid
+            for l in logs:
+                new_tid = id_map.get(l.get("task_id"))
+                if new_tid is None:
+                    continue
+                conn.execute(
+                    "INSERT INTO progress_log (task_id, progress, note, created_at) VALUES (?,?,?,?)",
+                    (new_tid, int(l.get("progress", 0)), l.get("note", ""), l.get("created_at")),
+                )
+        conn.commit()
+    except Exception as ex:
+        conn.rollback()
+        return 0, 0, str(ex)
+    finally:
+        conn.close()
+    return len(tasks), len(logs), ""
 
 
 def log_progress(task_id, progress, note=""):
@@ -653,6 +772,23 @@ def main():
     )
 
     with st.sidebar:
+        st.markdown("### 🧭 功能导航")
+        page = st.radio(
+            "导航",
+            [
+                "📊 数据驾驶舱",
+                "📋 任务管理",
+                "🏭 设备负荷",
+                "📅 进度甘特图",
+                "📈 统计分析",
+                "⚠️ 预警清单",
+                "📜 进度历史",
+                "🤖 AI助手小童",
+            ],
+            label_visibility="collapsed",
+        )
+        st.caption("总览 → 执行 → 分析 → 追溯 → 智能")
+        st.markdown("---")
         st.markdown("### 🔍 筛选条件")
         if df_all.empty:
             st.info("暂无任务数据，请先在「任务管理」页录入任务")
@@ -700,12 +836,10 @@ def main():
     if df_all.empty:
         df = df_all
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-        "📊 数据驾驶舱", "🏭 设备负荷", "📋 任务管理", "📅 进度甘特图",
-        "⚠️ 预警清单", "📈 统计分析", "📜 进度历史", "🤖 AI助手小童",
-    ])
+    if "chat_messages" not in st.session_state:
+        st.session_state.chat_messages = []
 
-    with tab2:  # 设备 / 工位负荷看板
+    if page == "🏭 设备负荷":  # 设备 / 工位负荷看板
         st.markdown("#### 🏭 设备 / 工位负荷看板")
         if df_all.empty:
             st.info("暂无任务数据，请先在「任务管理」页录入任务并指定工位")
@@ -838,10 +972,7 @@ def main():
                         hide_index=True,
                     )
 
-    if "chat_messages" not in st.session_state:
-        st.session_state.chat_messages = []
-
-    with tab1:  # 数据驾驶舱
+    elif page == "📊 数据驾驶舱":
         st.markdown("#### 📊 生产任务总览")
         if df_all.empty:
             st.info("暂无数据，请先在「任务管理」录入任务")
@@ -891,7 +1022,7 @@ def main():
                 st.dataframe(g_styled, use_container_width=True, hide_index=True)
                 st.caption("按任务数排序")
 
-    with tab3:
+    elif page == "📋 任务管理":
         col_add, col_edit = st.columns(2)
         with col_add:
             st.markdown("##### ➕ 新增任务")
@@ -993,7 +1124,55 @@ def main():
                     st.error(f"文件解析失败：{ex}")
                     st.caption("提示：Excel 文件请保存为 .xlsx 格式（WPS/Office 另存为 → Excel 工作簿(*.xlsx)）")
 
-    with tab4:
+        st.markdown("##### 📦 数据备份与恢复")
+        with st.expander("备份全部数据 / 从备份恢复（含进度历史）"):
+            st.caption(
+                "⚠️ 云端免费部署环境在应用重新部署后可能清空数据。"
+                "建议每次录入重要数据后导出一份备份；万一数据丢失，用备份一键还原。"
+            )
+            b1, b2 = st.columns(2)
+            with b1:
+                _bk = export_backup()
+                st.download_button(
+                    "📤 导出完整备份",
+                    json.dumps(_bk, ensure_ascii=False, indent=2).encode("utf-8"),
+                    f"车间数据备份_{date.today().isoformat()}.json",
+                    "application/json",
+                    use_container_width=True,
+                )
+                st.caption(f"当前：{_bk['task_count']} 个任务 · {_bk['log_count']} 条历史记录")
+            with b2:
+                bk_file = st.file_uploader("选择备份文件（.json）", type=["json"], key="bk_import")
+                if bk_file is not None:
+                    try:
+                        bk_data = json.loads(bk_file.read().decode("utf-8"))
+                        n_t = len(bk_data.get("tasks", []))
+                        n_l = len(bk_data.get("progress_log", []))
+                        st.info(
+                            f"备份包含 **{n_t}** 个任务、**{n_l}** 条历史，"
+                            f"导出于 {bk_data.get('exported_at', '未知')}"
+                        )
+                        rb1, rb2 = st.columns(2)
+                        if rb1.button("➕ 追加导入", use_container_width=True, key="bk_merge"):
+                            t_, l_, err = restore_backup(bk_data, "merge")
+                            if err:
+                                st.error(f"追加失败：{err}")
+                            else:
+                                st.success(f"✅ 已追加 {t_} 个任务、{l_} 条历史")
+                                st.rerun()
+                        confirm_rp = st.checkbox("确认清空现有数据", key="bk_confirm")
+                        if rb2.button("♻️ 覆盖恢复", use_container_width=True, key="bk_replace",
+                                      disabled=not confirm_rp):
+                            t_, l_, err = restore_backup(bk_data, "replace")
+                            if err:
+                                st.error(f"恢复失败：{err}")
+                            else:
+                                st.success(f"✅ 已覆盖恢复 {t_} 个任务、{l_} 条历史")
+                                st.rerun()
+                    except Exception as ex:
+                        st.error(f"备份文件解析失败：{ex}")
+
+    elif page == "📅 进度甘特图":
         st.markdown("#### 📅 任务时间线")
         if df.empty:
             st.info("暂无任务数据，请先录入任务")
@@ -1082,7 +1261,7 @@ def main():
                         styled = show.style.map(status_pill_css, subset=["状态"]).format({"完成进度(%)": "{:.0f}%"})
                         st.dataframe(styled, use_container_width=True, hide_index=True)
 
-    with tab5:
+    elif page == "⚠️ 预警清单":
         st.markdown("#### ⚠️ 风险预警")
         if df_all.empty:
             st.info("暂无任务数据")
@@ -1115,7 +1294,7 @@ def main():
                 soon_styled = soon_show.style.format({"完成进度(%)": "{:.0f}%"})
                 st.dataframe(soon_styled, use_container_width=True, hide_index=True)
 
-    with tab6:
+    elif page == "📈 统计分析":
         st.markdown("#### 📊 数据分析")
         if df_all.empty:
             st.info("暂无任务数据")
@@ -1190,7 +1369,7 @@ def main():
                 )
                 st.plotly_chart(owner_bar, use_container_width=True)
 
-    with tab7:  # 进度历史
+    elif page == "📜 进度历史":
         st.markdown("#### 📜 任务进度变更记录")
         log_df = load_progress_log()
         if log_df.empty:
@@ -1246,7 +1425,7 @@ def main():
                     use_container_width=True,
                 )
 
-    with tab8:  # AI助手小童
+    elif page == "🤖 AI助手小童":
         st.markdown("#### 🤖 AI助手小童")
         api_key, key_source = get_api_key()
         if api_key:

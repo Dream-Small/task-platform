@@ -6,3 +6,7 @@ __pycache__/
 .streamlit/secrets.toml
 secrets.toml
 .env
+# 运行时数据库：提交到 git 会导致每次部署覆盖云端数据
+tasks.db
+tasks.db-journal
+*.db
